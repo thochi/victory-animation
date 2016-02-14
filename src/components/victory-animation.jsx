@@ -2,6 +2,7 @@ import React from "react";
 import d3Ease from "d3-ease";
 import d3Interpolate from "d3-interpolate";
 import { timer } from "d3-timer";
+import { color } from "d3-color";
 import { addVictoryInterpolator } from "../util";
 
 // Nearly all animation libraries are duration-based, not velocity-based.
@@ -14,6 +15,10 @@ import { addVictoryInterpolator } from "../util";
 // velocity multiplier here that just happens to result in animations going
 // approximately the same speed on systems getting around 60 fps.
 const VELOCITY_MULTIPLIER = 16.5; // ~ 1 / 60
+
+// RegEx to dedect numbers in strings. Taken from
+// https://github.com/d3/d3-interpolate/blob/master/src/string.js
+const RE_NUMBERS_IN_STRINGS = /[-+]?(?:\d+\.?\d*|\.?\d+)(?:[eE][-+]?\d+)?/g;
 
 addVictoryInterpolator();
 
@@ -87,6 +92,8 @@ export default class VictoryAnimation extends React.Component {
       this.props.data.slice(1) : [];
     /* build easing function */
     this.ease = d3Ease[this.props.easing];
+    /* cache precisions of numbers found in strings */
+    this.strNumberPrecs = {};
     /*
       unlike React.createClass({}), there is no autobinding of this in ES6 classes
       so we bind functionToBeRunEachFrame to current instance of victory animation class
@@ -111,13 +118,45 @@ export default class VictoryAnimation extends React.Component {
       // but let's reuse the same array.
       this.queue.length = 0;
       this.queue.push(nextProps.data);
+      /* empty precisions cache */
+      this.strNumberPrecs = {};
     /* If an array was supplied */
     } else {
       /* Extend the tween queue */
       this.queue.push(...nextProps.data);
     }
+    /* fill precisions cache */
+    this.initStrNumberPrecs(nextProps.data);
     /* Start traversing the tween queue */
     this.traverseQueue();
+  }
+  initStrNumberPrecs(data) {
+    this.filterNonColorStrings(data).map((datum) => {
+      const re = new RegExp(RE_NUMBERS_IN_STRINGS.source, "g");
+      const precisions = [];
+      let m;
+      while ((m = re.exec(datum.value))) {
+        const parts = m[0].split(".");
+        precisions.push(parts.length > 1 ? parts[1].length : 0);
+      }
+      if (precisions.length) {
+        this.strNumberPrecs[datum.key] = precisions;
+      }
+    });
+  }
+  /*
+    don't handle color strings
+   */
+  filterNonColorStrings(data) {
+    const strings = [];
+    Object.keys(data).forEach((key) => {
+      const value = data[key];
+      // see https://github.com/d3/d3-interpolate/blob/master/src/values.js#L11
+      if (typeof value === "string" && !color(value)) {
+        strings.push({key, value});
+      }
+    });
+    return strings;
   }
   componentWillUnmount() {
     if (this.timer) {
@@ -146,9 +185,8 @@ export default class VictoryAnimation extends React.Component {
     const step = elapsed / (VELOCITY_MULTIPLIER / this.props.velocity);
 
     if (step >= 1) {
-      this.setState(this.interpolator(1));
+      this.setState(this.queue.shift());
       this.timer.stop();
-      this.queue.shift();
       this.traverseQueue(); // Will take care of calling `onEnd`.
       return;
     }
@@ -157,7 +195,28 @@ export default class VictoryAnimation extends React.Component {
       current step value that's transformed by the ease function to the
       interpolator, which is cached for performance whenever props are received
     */
-    this.setState(this.interpolator(this.ease(step)));
+    this.setState(this.formatStrNumbers(this.interpolator(this.ease(step))));
+  }
+  /*
+    format the interpolated numbers in their initial precision.
+    pairs of numbers handling adopted from here:
+    https://github.com/d3/d3-interpolate/blob/master/src/string.js#L31
+   */
+  formatStrNumbers(nextState) {
+    let bm;
+    Object.keys(this.strNumberPrecs).forEach((key) => {
+      const precisions = [...this.strNumberPrecs[key]];
+      const reA = new RegExp(RE_NUMBERS_IN_STRINGS.source, "g");
+      const reB = new RegExp(RE_NUMBERS_IN_STRINGS.source, "g");
+      let value = nextState[key];
+      while ((reA.exec(this.state[key])) && (bm = reB.exec(nextState[key]))) {
+        const precision = precisions.shift();
+        const formatted = Number.parseFloat(bm).toFixed(precision);
+        value = value.replace(`${bm}`, `${formatted}`);
+      }
+      nextState[key] = value;
+    });
+    return nextState;
   }
   render() {
     return this.props.children(this.state);
